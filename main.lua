@@ -4,6 +4,15 @@ local lg = love.graphics
 
 local width, height = 1024, 720
 
+-- Tunable parameters (feel free to adjust these to change difficulty)
+-- - `game.nutrient_rate`: how quickly nutrients (money) accumulate per second
+-- - `game.win_wave`: which wave number triggers a win when cleared
+-- - `spawn_interval`: how often individual enemies spawn between waves
+-- - `tower_types`: per-tower tuning: `cost`, `range`, `rate` (seconds between actions), `damage`,
+--   and specialized fields like `durability` (for neutrophils) or `engulf_hp` (for macrophages)
+-- - `enemy_types`: per-enemy tuning: `hp`, `speed`, `size`, and `score` (used as damage if enemy reaches goal)
+
+
 -- Grid for tower placement
 local grid = {
   cols = 10,
@@ -27,12 +36,19 @@ local game = {
   spawn_timer = 0,
   spawn_interval = 1.5,
   unlocked_adaptive = false,
+  health = 100,
+  max_health = 100,
+  state = 'playing', -- 'playing', 'won', 'lost'
+  win_wave = 6,
 }
 
 -- Tower definitions
 local tower_types = {
-  macrophage = { cost = 30, range = 80, rate = 1.2, damage = 20, color = {0.9,0.6,0.4}, desc = "Innate: AoE, slow" },
-  neutrophil = { cost = 20, range = 120, rate = 0.5, damage = 12, color = {0.8,0.8,0.6}, desc = "Innate: fast single-target" },
+  -- macrophage: slower, can engulf weak pathogens and help heal/clear
+  macrophage = { cost = 30, range = 80, rate = 1.6, damage = 18, engulf_hp = 22, heal_on_digest = 3, nutrient_on_digest = 6, color = {0.9,0.6,0.4}, desc = "Innate: engulfs weak pathogens, AoE slow" },
+  -- neutrophil: fast responder, high fire rate but short-lived (durability)
+  -- tunables: `durability` = number of shots before the cell dies
+  neutrophil = { cost = 20, range = 120, rate = 0.35, damage = 14, durability = 12, color = {0.8,0.8,0.6}, desc = "Innate: fast burst, short-lived" },
   tcell = { cost = 60, range = 180, rate = 0.8, damage = 30, color = {0.6,0.7,1}, desc = "Adaptive: strong projectile" },
   bcell = { cost = 70, range = 220, rate = 2.0, damage = 8, color = {1,0.7,0.9}, desc = "Adaptive: produces antibodies (particles)" },
 }
@@ -41,9 +57,10 @@ local selected_tower = 'macrophage'
 
 -- Enemy definitions
 local enemy_types = {
-  bacteria = { hp = 40, speed = 40, color = {0.2,0.9,0.2}, size = 18, score = 5 },
-  virus = { hp = 25, speed = 80, color = {0.9,0.2,0.2}, size = 12, score = 8 },
-  fungus = { hp = 80, speed = 30, color = {0.6,0.3,0.7}, size = 22, score = 12 },
+  -- enemy speeds are tunable: lower speeds make the game easier
+  bacteria = { hp = 40, speed = 30, color = {0.2,0.9,0.2}, size = 18, score = 5 },
+  virus = { hp = 25, speed = 60, color = {0.9,0.2,0.2}, size = 12, score = 8 },
+  fungus = { hp = 80, speed = 20, color = {0.6,0.3,0.7}, size = 22, score = 12 },
 }
 
 -- Utilities
@@ -106,6 +123,7 @@ local function place_tower_at(mousex, mousey)
   game.nutrients = game.nutrients - ty.cost
   local x,y = cell_to_world(cx,cy)
   local t = { type = selected_tower, cx = cx, cy = cy, x = x, y = y, def = ty, cooldown = 0 }
+  if ty.durability then t.durability = ty.durability end
   table.insert(game.towers, t)
 end
 
@@ -162,57 +180,104 @@ function love.update(dt)
       e.x = e.x + (dx/dist) * e.speed * dt
       e.y = e.y + (dy/dist) * e.speed * dt
     else
-      e.reached = true
+      -- enemy reached the goal: damage player and remove enemy
+      local dmg = enemy_types[e.kind] and enemy_types[e.kind].score or 5
+      game.health = game.health - dmg
+      table.remove(game.enemies, i)
     end
-    if e.hp <= 0 then table.remove(game.enemies, i) end
+    if e.hp and e.hp <= 0 then table.remove(game.enemies, i) end
   end
 
   -- update towers
-  for _,t in ipairs(game.towers) do
-    t.cooldown = t.cooldown - dt
-    if t.cooldown <= 0 then
-      -- find target
-      local best, bd = nil, 1e9
-      for _,e in ipairs(game.enemies) do
-        local dx = e.x - t.x
-        local dy = e.y - t.y
-        local d = math.sqrt(dx*dx+dy*dy)
-        if d <= t.def.range then
-          if t.type == 'macrophage' then
-            -- AoE: damage and slight slow to nearby
-            damage_enemy(e, t.def.damage)
-            for _,o in ipairs(game.enemies) do
-              local dx2 = o.x - e.x
-              local dy2 = o.y - e.y
-              local dd = math.sqrt(dx2*dx2+dy2*dy2)
-              if dd < 40 then o.x = o.x - (dx2/dd or 0) * 4 end
+  if game.state == 'playing' then
+    for _,t in ipairs(game.towers) do
+      t.cooldown = t.cooldown - dt
+      if t.cooldown <= 0 then
+        -- find target
+        local best, bd = nil, 1e9
+        for _,e in ipairs(game.enemies) do
+          local dx = e.x - t.x
+          local dy = e.y - t.y
+          local d = math.sqrt(dx*dx+dy*dy)
+          if d <= t.def.range then
+            if t.type == 'macrophage' then
+              -- macrophage: try to engulf weak pathogens first
+              if e.hp <= (t.def.engulf_hp or 0) then
+                -- engulf: remove enemy, grant nutrients and small heal
+                -- sanitize tunable values to avoid accidental negative heals or non-numbers
+                local nutrients_gain = tonumber(t.def.nutrient_on_digest) or 4
+                if nutrients_gain < 0 then nutrients_gain = 0 end
+                game.nutrients = game.nutrients + nutrients_gain
+                local heal_amount = tonumber(t.def.heal_on_digest) or 1
+                if heal_amount < 0 then heal_amount = 0 end
+                game.health = math.min(game.max_health, (tonumber(game.health) or 0) + heal_amount)
+                -- spawn a digestion particle burst
+                for k=1,10 do table.insert(game.particles, { x = e.x + (math.random()-0.5)*e.size, y = e.y + (math.random()-0.5)*e.size, vx = (math.random()-0.5)*40, vy = (math.random()-0.5)*40, t = 0.8 }) end
+                -- remove the enemy
+                for j=#game.enemies,1,-1 do if game.enemies[j] == e then table.remove(game.enemies,j); break end end
+                t.cooldown = t.def.rate
+                break
+              else
+                -- AoE: damage and slight slow to nearby
+                damage_enemy(e, t.def.damage)
+                for _,o in ipairs(game.enemies) do
+                  local dx2 = o.x - e.x
+                  local dy2 = o.y - e.y
+                  local dd = math.sqrt(dx2*dx2+dy2*dy2)
+                  if dd < 40 then o.x = o.x - (dx2/dd or 0) * 4 end
+                end
+                t.cooldown = t.def.rate
+                break
+              end
+            elseif t.type == 'neutrophil' then
+              if d < bd then best, bd = e, d end
+            elseif t.type == 'tcell' then
+              best = e; break
+            elseif t.type == 'bcell' then
+              -- bcell: spawn antibodies (particle projectiles)
+              for i=1,2 do
+                local ang = math.random()*math.pi*2
+                local px = t.x + math.cos(ang)*10
+                local py = t.y + math.sin(ang)*10
+                fire_projectile(px,py,t.x + math.cos(ang)*100, t.y + math.sin(ang)*100, 120, t.def.damage)
+              end
+              t.cooldown = t.def.rate
+              break
             end
-            t.cooldown = t.def.rate
-            break
-          elseif t.type == 'neutrophil' then
-            if d < bd then best, bd = e, d end
-          elseif t.type == 'tcell' then
-            best = e; break
-          elseif t.type == 'bcell' then
-            -- bcell: spawn antibodies (particle projectiles)
-            for i=1,2 do
-              local ang = math.random()*math.pi*2
-              local px = t.x + math.cos(ang)*10
-              local py = t.y + math.sin(ang)*10
-              fire_projectile(px,py,t.x + math.cos(ang)*100, t.y + math.sin(ang)*100, 120, t.def.damage)
-            end
-            t.cooldown = t.def.rate
-            break
           end
         end
+        if best and t.type == 'neutrophil' then
+          fire_projectile(t.x, t.y, best.x, best.y, 320, t.def.damage)
+          t.cooldown = t.def.rate
+          -- neutrophils are short-lived: reduce durability per shot
+          if t.durability then
+            t.durability = t.durability - 1
+            if t.durability <= 0 then t.remove = true end
+          end
+        elseif best and t.type == 'tcell' then
+          fire_projectile(t.x, t.y, best.x, best.y, 380, t.def.damage)
+          t.cooldown = t.def.rate
+        end
       end
-      if best and t.type == 'neutrophil' then
-        fire_projectile(t.x, t.y, best.x, best.y, 320, t.def.damage)
-        t.cooldown = t.def.rate
-      elseif best and t.type == 'tcell' then
-        fire_projectile(t.x, t.y, best.x, best.y, 380, t.def.damage)
-        t.cooldown = t.def.rate
+    end
+
+
+    -- remove expired towers (e.g., neutrophils that exhausted durability)
+    for i=#game.towers,1,-1 do
+      if game.towers[i].remove then
+        -- spawn a small particle puff to indicate cell death
+        local tt = game.towers[i]
+        for k=1,8 do table.insert(game.particles, { x = tt.x + (math.random()-0.5)*12, y = tt.y + (math.random()-0.5)*12, vx = (math.random()-0.5)*30, vy = (math.random()-0.5)*30, t = 0.6 }) end
+        table.remove(game.towers, i)
       end
+    end
+    -- spawn handling (only while playing)
+    game.spawn_timer = game.spawn_timer + dt
+    if game.spawn_timer >= game.spawn_interval then
+      game.spawn_timer = game.spawn_timer - game.spawn_interval
+      -- spawn a single enemy occasionally between waves to keep action
+      local r = math.random()
+      if r < 0.5 then spawn_enemy('bacteria') elseif r < 0.8 then spawn_enemy('virus') else spawn_enemy('fungus') end
     end
   end
 
@@ -236,6 +301,13 @@ function love.update(dt)
     if p.t <= 0 then table.remove(game.projectiles, i) end
   end
 
+  -- check win / loss
+  if game.health <= 0 and game.state == 'playing' then
+    game.state = 'lost'
+  end
+  if game.state == 'playing' and game.wave > game.win_wave and #game.enemies == 0 then
+    game.state = 'won'
+  end
   -- update particles
   for i=#game.particles,1,-1 do
     local p = game.particles[i]
@@ -247,6 +319,7 @@ function love.update(dt)
 end
 
 function love.mousepressed(x,y,b)
+  if game.state ~= 'playing' then return end
   if b == 1 then
     place_tower_at(x,y)
   elseif b == 2 then
@@ -255,6 +328,24 @@ function love.mousepressed(x,y,b)
 end
 
 function love.keypressed(k)
+  if k == 'r' then
+    -- restart
+    game.time = 0
+    game.nutrients = 50
+    game.resting = false
+    game.wave = 1
+    game.enemies = {}
+    game.towers = {}
+    game.projectiles = {}
+    game.particles = {}
+    game.spawn_timer = 0
+    game.unlocked_adaptive = false
+    game.health = game.max_health
+    game.state = 'playing'
+    spawn_wave()
+    return
+  end
+  if game.state ~= 'playing' then return end
   if k == '1' then selected_tower = 'macrophage' end
   if k == '2' then selected_tower = 'neutrophil' end
   if k == '3' and game.unlocked_adaptive then selected_tower = 'tcell' end
@@ -314,6 +405,7 @@ function love.draw()
   lg.print(string.format("Time: %.1fs", game.time), 12, 12)
   lg.print(string.format("Nutrients: %d", math.floor(game.nutrients)), 12, 32)
   lg.print(string.format("Wave: %d", game.wave-1), 12, 52)
+  lg.print(string.format("Health: %d/%d", math.max(0, math.floor(game.health)), game.max_health), 12, 152)
   lg.print("Resting (right-click): " .. (game.resting and "ON" or "OFF"), 12, 72)
   lg.print("Selected: " .. selected_tower, 12, 92)
   lg.print("Keys: 1 macrophage, 2 neutrophil, 3 T-cell, 4 B-cell (adaptive unlocks after 25s)", 12, 112)
@@ -322,5 +414,22 @@ function love.draw()
   if not game.unlocked_adaptive then
     lg.setColor(1,1,1,0.6)
     lg.print("Adaptive immunity will unlock shortly...", width - 320, 12)
+  end
+
+  -- End screens
+  if game.state == 'lost' then
+    lg.setColor(0,0,0,0.6)
+    lg.rectangle('fill', 0, 0, width, height)
+    lg.setColor(1,0.2,0.2)
+    lg.printf("GAME OVER", 0, height/2 - 40, width, 'center')
+    lg.setColor(1,1,1)
+    lg.printf("Press R to restart", 0, height/2 + 10, width, 'center')
+  elseif game.state == 'won' then
+    lg.setColor(0,0,0,0.6)
+    lg.rectangle('fill', 0, 0, width, height)
+    lg.setColor(0.4,1,0.4)
+    lg.printf("YOU WIN!", 0, height/2 - 40, width, 'center')
+    lg.setColor(1,1,1)
+    lg.printf("Press R to play again", 0, height/2 + 10, width, 'center')
   end
 end
