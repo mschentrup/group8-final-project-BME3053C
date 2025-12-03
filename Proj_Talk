@@ -1,0 +1,19 @@
+Proj Talk:
+
+Chat-generated game idea:
+  Microbe Mayhem – Immune System Defense
+  
+  Genre: Tower defense / action-strategy
+  Educational Focus: Innate vs. adaptive immunity, pathogen types
+  
+  Pitch:
+  You control the body’s immune cells as pathogens invade. Place “towers” such as macrophages and neutrophils, then later unlock adaptive units like T-cells and B-cells. Resources come from nutrients absorbed via a simulated bloodstream mechanic.
+  Players learn:
+  
+  Differences between bacteria, viruses, fungi
+  
+  Immune system timing (innate response early, adaptive later)
+  
+  Why nutrition and rest matter for immune function
+  
+  Love2D Fit: Beautiful particle effects for antibodies, simple grid placement logic, pathfinding for pathogens.
