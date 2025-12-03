@@ -17,3 +17,21 @@ Chat-generated game idea:
   Why nutrition and rest matter for immune function
   
   Love2D Fit: Beautiful particle effects for antibodies, simple grid placement logic, pathfinding for pathogens.
+
+
+Types of Immune cells (towers) 
+    Neutrophils → Most abundant; first responders that engulf bacteria and fungi.
+    Eosinophils → Target larger parasites; also modulate allergic responses.
+    Macrophages → “Big eaters” that engulf pathogens, dead cells, and debris.
+    Dendritic Cells → Capture antigens and present them to T-cells, bridging innate and adaptive immunity
+    B Cells → Produce antibodies; differentiate into plasma cells and memory B cells.
+    Helper T Cells (CD4+) → Coordinate immune responses.
+    Cytotoxic T Cells (CD8+) → Kill infected or cancerous cells.
+      - maybe there is a random chance one of you cells becomes cancerous, and you can only kill these with the cytotoxic t cells
+    Regulatory T Cells → Suppress excessive immune reactions.
+    Natural Killer (NK) Cells → Destroy virus-infected and tumor cells without prior sensitization
+Immune Response Factors:
+    We could have things like oxygen levels, zinc levels, Vitamin D levels, and iron levels be things that players have to monitor
+    We could also have random "weather" conditions happen that suppress certain types of cells, like stress, slowing down the T cell towers
+
+
