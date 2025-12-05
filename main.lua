@@ -1,4 +1,9 @@
 -- Microbe Mayhem: Immune System Defense (Love2D prototype)
+-- Quick overview:
+-- - Grid-based tower defense with innate/adaptive immune cells as towers
+-- - Enemies traverse left->right; if they reach the goal, player loses health
+-- - Nutrients act as resources; resting toggles faster nutrient gain
+-- - Adaptive unlocks after ~25s; tumors require Cytotoxic T or NK to kill
 
 local lg = love.graphics
 
@@ -36,6 +41,9 @@ local game = {
   spawn_timer = 0,
   spawn_interval = 1.5,
   unlocked_adaptive = false,
+  -- environmental factors that affect immune function (0-100)
+  factors = { oxygen = 100, zinc = 100, vitD = 100, iron = 100 },
+  event = nil, -- current environmental event {name, affected, multiplier, ends_at}
   health = 100,
   max_health = 100,
   state = 'playing', -- 'playing', 'won', 'lost'
@@ -51,6 +59,18 @@ local tower_types = {
   neutrophil = { cost = 20, range = 120, rate = 0.35, damage = 14, durability = 12, color = {0.8,0.8,0.6}, desc = "Innate: fast burst, short-lived" },
   tcell = { cost = 60, range = 180, rate = 0.8, damage = 30, color = {0.6,0.7,1}, desc = "Adaptive: strong projectile" },
   bcell = { cost = 70, range = 220, rate = 2.0, damage = 8, color = {1,0.7,0.9}, desc = "Adaptive: produces antibodies (particles)" },
+  -- eosinophils: effective vs larger targets (fungus/parasite), cause area damage to big enemies
+  eosinophil = { cost = 28, range = 100, rate = 1.0, damage = 20, effective_against = { 'fungus' }, color = {1,0.5,0.5}, desc = "Innate: targets larger parasites/fungi" },
+  -- dendritic cells: capture antigens and increase chance of adaptive unlock (accelerate adaptive immunity)
+  dendritic = { cost = 40, range = 140, rate = 3.0, color = {0.5,0.8,0.5}, desc = "Bridges innate->adaptive: speeds adaptive unlock" },
+  -- helper T cells (CD4+): buff other adaptive cells (reduce their cooldown)
+  helper_tcell = { cost = 80, range = 220, rate = 3.5, buff = 0.85, color = {0.4,0.8,1}, desc = "Adaptive helper: buffs other adaptive cells' rate" },
+  -- cytotoxic T cells (CD8+): kill infected/cancerous cells (required for tumor enemies)
+  cytotoxic_tcell = { cost = 100, range = 200, rate = 0.9, damage = 50, color = {0.7,0.2,0.7}, desc = "Adaptive cytotoxic: kills tumor/infected cells" },
+  -- regulatory T cells: suppress excessive immune reactions (reduce buff/overactivity)
+  regulatory_tcell = { cost = 60, range = 200, rate = 4.0, suppress = 0.9, color = {0.6,0.6,0.9}, desc = "Suppresses excessive immune responses" },
+  -- natural killer cells: innate killers that can also remove tumor cells without prior sensitization
+  nk = { cost = 90, range = 160, rate = 0.7, damage = 40, color = {0.9,0.4,0.4}, desc = "Innate killer: removes virus-infected and tumor cells" },
 }
 
 local selected_tower = 'macrophage'
@@ -84,7 +104,9 @@ local spawn_x = 20
 local path_y = height/2
 
 -- Game functions
-local function spawn_enemy(kind)
+-- Spawn a single enemy of a given kind.
+-- If forceTumor=true, mark it as a tumor (only Cytotoxic/NK can damage).
+local function spawn_enemy(kind, forceTumor)
   local def = enemy_types[kind]
   local e = {
     kind = kind,
@@ -96,7 +118,10 @@ local function spawn_enemy(kind)
     size = def.size,
     color = def.color,
     reached = false,
-  }
+      -- small chance an enemy is a tumor-like cell that only cytotoxic T cells / NK can kill
+      tumor = (forceTumor and true) or (math.random() < 0.02),
+    }
+    if e.tumor then e.color = {0.6,0,0.6}; e.size = math.max(10, e.size-2) end
   table.insert(game.enemies, e)
 end
 
@@ -127,19 +152,31 @@ local function place_tower_at(mousex, mousey)
   table.insert(game.towers, t)
 end
 
-local function damage_enemy(e, dmg)
+-- Apply damage to an enemy. Returns true if damage was applied, false if blocked.
+-- owner: optional string ('cytotoxic_tcell'|'nk') used for tumor-only damage rules.
+local function damage_enemy(e, dmg, owner)
+  -- owner: optional string identifying which cell type dealt damage (e.g., 'cytotoxic_tcell', 'nk')
+  -- tumor enemies can only be damaged by cytotoxic T cells or NK cells
+  if e.tumor then
+    if not owner or not (owner == 'cytotoxic_tcell' or owner == 'nk') then
+      return false
+    end
+  end
   e.hp = e.hp - dmg
   -- spawn particles
   for i=1,6 do
     local p = { x = e.x + (math.random()-0.5)*e.size, y = e.y + (math.random()-0.5)*e.size, vx = (math.random()-0.5)*60, vy = (math.random()-0.5)*60, t = 0.6 }
     table.insert(game.particles, p)
   end
+  return true
 end
 
 -- Projectiles
-local function fire_projectile(sx, sy, tx, ty, speed, damage)
+-- Fire a projectile toward (tx,ty). Projectiles carry optional 'owner' for tumor rules.
+local function fire_projectile(sx, sy, tx, ty, speed, damage, owner)
+  -- LuaJIT (used by LÖVE) provides math.atan2; computes angle from source to target.
   local ang = math.atan2(ty - sy, tx - sx)
-  local p = { x = sx, y = sy, vx = math.cos(ang)*speed, vy = math.sin(ang)*speed, damage = damage, t = 5 }
+  local p = { x = sx, y = sy, vx = math.cos(ang)*speed, vy = math.sin(ang)*speed, damage = damage, t = 5, owner = owner }
   table.insert(game.projectiles, p)
 end
 
@@ -224,7 +261,10 @@ function love.update(dt)
                   local dx2 = o.x - e.x
                   local dy2 = o.y - e.y
                   local dd = math.sqrt(dx2*dx2+dy2*dy2)
-                  if dd < 40 then o.x = o.x - (dx2/dd or 0) * 4 end
+                  -- Guard dd>0 to avoid division by zero / NaN when overlapping
+                  if dd > 0 and dd < 40 then
+                    o.x = o.x - (dx2/dd) * 4
+                  end
                 end
                 t.cooldown = t.def.rate
                 break
@@ -243,6 +283,8 @@ function love.update(dt)
               end
               t.cooldown = t.def.rate
               break
+            elseif t.type == 'cytotoxic_tcell' or t.type == 'nk' then
+              if d < bd then best, bd = e, d end
             end
           end
         end
@@ -256,6 +298,12 @@ function love.update(dt)
           end
         elseif best and t.type == 'tcell' then
           fire_projectile(t.x, t.y, best.x, best.y, 380, t.def.damage)
+          t.cooldown = t.def.rate
+        elseif best and t.type == 'cytotoxic_tcell' then
+          fire_projectile(t.x, t.y, best.x, best.y, 380, t.def.damage, 'cytotoxic_tcell')
+          t.cooldown = t.def.rate
+        elseif best and t.type == 'nk' then
+          fire_projectile(t.x, t.y, best.x, best.y, 360, t.def.damage, 'nk')
           t.cooldown = t.def.rate
         end
       end
@@ -271,14 +319,6 @@ function love.update(dt)
         table.remove(game.towers, i)
       end
     end
-    -- spawn handling (only while playing)
-    game.spawn_timer = game.spawn_timer + dt
-    if game.spawn_timer >= game.spawn_interval then
-      game.spawn_timer = game.spawn_timer - game.spawn_interval
-      -- spawn a single enemy occasionally between waves to keep action
-      local r = math.random()
-      if r < 0.5 then spawn_enemy('bacteria') elseif r < 0.8 then spawn_enemy('virus') else spawn_enemy('fungus') end
-    end
   end
 
   -- update projectiles
@@ -293,8 +333,12 @@ function love.update(dt)
       local dx = e.x - p.x
       local dy = e.y - p.y
       if dx*dx + dy*dy < (e.size+4)^2 then
-        damage_enemy(e, p.damage)
-        table.remove(game.projectiles, i)
+        local applied = damage_enemy(e, p.damage, p.owner)
+        if applied then
+          table.remove(game.projectiles, i)
+        else
+          -- projectile had no effect (e.g., tumor vs non-cytotoxic projectile); let it pass through
+        end
         break
       end
     end
@@ -350,7 +394,19 @@ function love.keypressed(k)
   if k == '2' then selected_tower = 'neutrophil' end
   if k == '3' and game.unlocked_adaptive then selected_tower = 'tcell' end
   if k == '4' and game.unlocked_adaptive then selected_tower = 'bcell' end
+  if k == '5' and game.unlocked_adaptive then selected_tower = 'cytotoxic_tcell' end
+  if k == '6' then selected_tower = 'nk' end
   if k == 'space' then spawn_wave() end
+  -- Debug: spawn tumor enemies (t = one, Shift+t = five)
+  if k == 't' then
+    local count = 1
+    if love.keyboard.isDown('lshift','rshift') then count = 5 end
+    for i=1,count do
+      local kinds = { 'bacteria','virus','fungus' }
+      local kind = kinds[math.random(#kinds)]
+      spawn_enemy(kind, true)
+    end
+  end
 end
 
 function love.draw()
@@ -405,11 +461,13 @@ function love.draw()
   lg.print(string.format("Time: %.1fs", game.time), 12, 12)
   lg.print(string.format("Nutrients: %d", math.floor(game.nutrients)), 12, 32)
   lg.print(string.format("Wave: %d", game.wave-1), 12, 52)
-  lg.print(string.format("Health: %d/%d", math.max(0, math.floor(game.health)), game.max_health), 12, 152)
+  lg.print(string.format("Health: %d/%d", math.max(0, math.floor(game.health)), game.max_health), 12, 192)
   lg.print("Resting (right-click): " .. (game.resting and "ON" or "OFF"), 12, 72)
   lg.print("Selected: " .. selected_tower, 12, 92)
-  lg.print("Keys: 1 macrophage, 2 neutrophil, 3 T-cell, 4 B-cell (adaptive unlocks after 25s)", 12, 112)
-  lg.print("Click grid to place tower. Space to spawn wave.", 12, 132)
+  lg.print("Keys: 1 macrophage, 2 neutrophil, 3 T-cell, 4 B-cell (adaptive in ~25s)", 12, 112)
+  lg.print("5 Cytotoxic T (adaptive), 6 NK; T: spawn tumor (Shift=T x5)", 12, 132)
+  lg.print("Click grid to place tower. Space to spawn wave.", 12, 152)
+  lg.print("Tumors: only Cytotoxic T (5) or NK (6) can kill them.", 12, 172)
 
   if not game.unlocked_adaptive then
     lg.setColor(1,1,1,0.6)
