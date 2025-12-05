@@ -134,16 +134,20 @@ local function grid_center(cx, cy)
 end
 local path_points = {
   { x = spawn_x, y = select(2, grid_center(1, 2)) },
-  (function() local x,y=grid_center(2,2); return {x=x,y=y} end)(),
-  (function() local x,y=grid_center(5,2); return {x=x,y=y} end)(),
-  (function() local x,y=grid_center(5,4); return {x=x,y=y} end)(),
-  (function() local x,y=grid_center(7,4); return {x=x,y=y} end)(),
-  (function() local x,y=grid_center(7,6); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(4,2); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(4,3); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(6,3); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(6,5); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(3,5); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(3,6); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(8,6); return {x=x,y=y} end)(),
+    (function() local x,y=grid_center(8,7); return {x=x,y=y} end)(),
+    { x = goal_x, y = select(2, grid_center(grid.cols, 7)) },
   { x = goal_x, y = select(2, grid_center(grid.cols, 6)) },
 }
 -- Placement safety: disallow towers on/near the path within a corridor radius
 -- Corridor radius scales with grid cell size so visuals/placement match
-local path_corridor_radius = math.floor(grid.cell * 0.6)
+ local path_corridor_radius = math.floor(grid.cell * 0.5)
 local function dist2_point_segment(px, py, ax, ay, bx, by)
   local vx, vy = bx - ax, by - ay
   local wx, wy = px - ax, py - ay
@@ -547,7 +551,7 @@ function love.draw()
   local panelX = width - 360
   local panelY = height - (#info*22 + 24) - 20
   lg.setColor(0,0,0,0.35)
-  lg.rectangle('fill', panelX-12, panelY-12, 332, #info*22 + 24, 8)
+  lg.rectangle('fill', panelX-12, panelY-12, 420, #info*22 + 24, 8)
   lg.setColor(1,1,1)
   for i,ln in ipairs(info) do
     lg.print(ln, panelX, panelY + (i-1)*22)
