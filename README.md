@@ -56,7 +56,13 @@
  ## Notes
 
  - Core gameplay resides in `main.lua`; window config in `conf.lua`.
- - The dev container may not support GUI; run locally with LÖVE installed.
+- Codespaces/dev containers are headless and typically cannot run LÖVE's GUI. Install and run LÖVE on your local desktop.
+
+### Running from GitHub Codespaces
+
+- Why it fails: LÖVE requires a graphical display (SDL video). Codespaces containers have no GUI/X server.
+- What to do instead: Run locally on Windows/macOS/Linux as described above.
+- Optional (tooling only): You can install `love` inside the container to check versions, but starting the game will still fail.
 
 Run
 
